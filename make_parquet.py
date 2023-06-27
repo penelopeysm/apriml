@@ -1,15 +1,36 @@
 import sqlite3
 import pandas as pd
 
-conn = sqlite3.connect('posts.db')
+INPUT_DATABASE_NAME = 'posts.db'
+OUTPUT_FILE_NAME = 'posts.parquet'
+
+# Read in data from SQLite database
+conn = sqlite3.connect(INPUT_DATABASE_NAME)
 posts = pd.read_sql('SELECT * FROM posts', conn)
 votes = pd.read_sql('SELECT * FROM votes', conn)
 conn.close()
 
-posts = (posts.merge(votes, on='id', how='left', validate='one_to_many')
+# Check for vote conflicts (i.e. posts where two people voted differently)
+vote_conflict_ids = (votes.loc[votes.duplicated(subset=['id'], keep=False)]
+                     .groupby('id')
+                     .agg({'vote': 'nunique'})
+                     .query('vote > 1')
+                     .index
+                     .to_list()
+                     )
+if vote_conflict_ids:
+    raise ValueError(f'Vote conflicts were found for following ids: '
+                     '\n'.join(vote_conflict_ids)
+                     )
+else:
+    print('No vote conflicts found.')
+
+# Merge votes onto post database, and output
+posts = (posts.merge(votes, on='id', how='left')
          .query('vote == 1 or vote == 0')
          .drop(columns=['url', 'n', 'username', 'truth'])
          )
 posts['hit'] = posts['hit'].astype(bool)
 posts['vote'] = posts['vote'].astype(bool)
-posts.to_parquet('posts.parquet', index=False)
+posts.to_parquet(OUTPUT_FILE_NAME, index=False)
+print(f'Data saved to {OUTPUT_FILE_NAME}.')
