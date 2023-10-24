@@ -1,37 +1,28 @@
-import sqlite3
 import pandas as pd
+import os
 
-INPUT_DATABASE_NAME = 'posts.db'
+CONN_STRING = os.getenv('FLY_PG_PROXY_CONN_STRING').replace("postgres://", "postgresql://")
 OUTPUT_FILE_NAME = 'posts.parquet'
 
-# Read in data from SQLite database
-conn = sqlite3.connect(INPUT_DATABASE_NAME)
-posts = pd.read_sql('SELECT * FROM posts', conn)
-votes = pd.read_sql('SELECT * FROM votes', conn)
-conn.close()
+# Check for vote conflicts
+vote_conflict_post_ids = pd.read_sql('''
+SELECT post_id FROM votes
+GROUP BY post_id
+HAVING COUNT(DISTINCT(vote)) > 1;
+''', CONN_STRING)['post_id'].tolist()
 
-# Check for vote conflicts (i.e. posts where two people voted differently)
-vote_conflict_ids = (votes.loc[votes.duplicated(subset=['id'], keep=False)]
-                     .groupby('id')
-                     .agg({'vote': 'nunique'})
-                     .query('vote > 1')
-                     .index
-                     .to_list()
-                     )
-if vote_conflict_ids:
+if len(vote_conflict_post_ids) > 0:
     raise ValueError(f'Vote conflicts were found for following ids: '
-                     '\n'.join(vote_conflict_ids)
+                     '\n'.join(vote_conflict_post_ids)
                      )
 else:
     print('No vote conflicts found.')
 
-# Merge votes onto post database, and output
-posts = (posts.merge(votes, on='id', how='left')
-         .query('vote == 1 or vote == 0')
-         .drop(columns=['url', 'n', 'username', 'truth'])
-         .drop_duplicates(subset=['id'])
-         )
-posts['hit'] = posts['hit'].astype(bool)
-posts['vote'] = posts['vote'].astype(bool)
-posts.to_parquet(OUTPUT_FILE_NAME, index=False)
-print(f'{len(posts)} posts saved to {OUTPUT_FILE_NAME}.')
+# Get all posts
+pd.read_sql('''
+SELECT DISTINCT ON (p.id)
+p.id, p.title, p.body, p.submitter, p.utc_time, p.flair, p.hit, v.vote
+FROM posts p
+LEFT JOIN votes v ON v.post_id = p.id;
+''', CONN_STRING).to_parquet(OUTPUT_FILE_NAME, index=False)
+print(f'Posts saved to {OUTPUT_FILE_NAME}.')
